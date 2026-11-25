@@ -1,0 +1,732 @@
+---
+title: "Treatment Effects and Clinical Risk Factors in Hospitalized Patients With Acute Kidney Injury"
+author: "Bernard Sefah"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  pdf_document:
+    toc: false
+    number_sections: true
+    latex_engine: xelatex
+geometry: margin=0.8in
+fontsize: 10pt
+linestretch: 1.05
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{float}
+  - \usepackage{titlesec}
+  - \titlespacing*{\section}{0pt}{1.0ex}{0.5ex}
+  - \titlespacing*{\subsection}{0pt}{0.8ex}{0.3ex}
+bibliography: reference.bib
+nocite: '@*'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE, message = FALSE, warning = FALSE,
+  fig.align = "center", fig.width = 6.5, fig.height = 3.8,
+  out.width = "88%", fig.pos = "H"
+)
+options(scipen = 999)
+set.seed(532)
+
+required_packages <- c(
+  "tidyverse", "brms", "posterior", "bayesplot", "loo",
+  "knitr", "kableExtra", "scales"
+)
+missing_packages <- required_packages[
+  !vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)
+]
+if (length(missing_packages) > 0) {
+  stop("Install these packages before knitting: ",
+       paste(missing_packages, collapse = ", "))
+}
+invisible(lapply(required_packages, library, character.only = TRUE))
+```
+
+# Introduction
+
+Acute kidney injury (AKI) is a serious complication among hospitalized patients and may lead to worsening kidney function, dialysis, or death [@coca2009long]. The KAT-AKI randomized clinical trial evaluated individualized kidney action team recommendations intended to support clinical management [@aklilu2024]. Although the overall effect of an intervention is important, its benefit may differ across patients with different baseline kidney health.
+
+This report examines whether randomized assignment to the KAT intervention, compared with usual care, is associated with the 14-day composite outcome of AKI progression, dialysis, or death. It focuses on possible treatment-effect differences by pre-existing chronic kidney disease (CKD) and baseline serum creatinine. The central question is: **Does the effect of intervention assignment on the 14-day composite outcome differ according to CKD status or baseline serum creatinine?**
+
+# Data and study population
+
+The analysis uses the limited KAT-AKI dataset from the randomized trial  [@aklilu2024]. The analytic sample contains 4,003 hospitalized patients from six hospitals. The primary outcome is binary: 1 indicates that a participant experienced at least one of AKI progression, dialysis, or death within 14 days; 0 indicates none of these events. Because a participant could experience more than one component, component counts are not added to obtain the number of participants with the composite outcome.
+
+The exposure of interest is randomized assignment, coded 1 for the KAT intervention and 0 for usual care. CKD and baseline serum creatinine are the two prespecified effect modifiers. Models also adjust for age (in centered 10-year units), an indicator for age over 90 years, sex, congestive heart failure, diabetes, hypertension, cirrhosis, and hospital. Baseline creatinine is standardized before modeling.
+
+The sample was relatively balanced by randomized group: 2,004 participants (50.1%) received usual care and 1,999 (49.9%) were assigned to intervention. Mean age was 69.07 years (SD 15.31), 46.8% were female, and 41.6% had pre-existing CKD. Mean baseline creatinine was 1.31 mg/dL (SD 0.61). Overall, 764 participants (19.1%) experienced the composite outcome.
+
+```{r data-import}
+data_file <- "KAT-AKI_limited_dataset.04-23-26.csv"
+if (!file.exists(data_file)) {
+  stop(
+    "The data file '", data_file,
+    "' was not found. Put it in the same folder as this R Markdown file."
+  )
+}
+
+kat_aki <- readr::read_csv(data_file, show_col_types = FALSE)
+
+# The supplied CSV names the age field `age_int`; the data dictionary calls
+# the same measure `age`. Accept either name and standardize it to `age`.
+if (!"age" %in% names(kat_aki)) {
+  if ("age_int" %in% names(kat_aki)) {
+    kat_aki <- dplyr::rename(kat_aki, age = age_int)
+  } else {
+    stop("The dataset must contain either an `age` or `age_int` column.")
+  }
+}
+
+stopifnot(nrow(kat_aki) == 4003)
+```
+
+```{r descriptive-table}
+dat <- kat_aki %>%
+  mutate(
+    primary_outcome = as.integer(primary_outcome),
+    randomization = as.integer(randomization),
+    ckd_pmhx = as.integer(ckd_pmhx),
+    age = as.numeric(age),
+    age_over_90 = as.integer(age_over_90),
+    baseline_creat = as.numeric(baseline_creat),
+    femalesex = as.integer(femalesex),
+    chf_pmhx = as.integer(chf_pmhx),
+    dm_pmhx = as.integer(dm_pmhx),
+    htn_pmhx = as.integer(htn_pmhx),
+    cirrhosis_pmhx = as.integer(cirrhosis_pmhx),
+    hospital = factor(hospital)
+  )
+
+desc <- tibble(
+  Characteristic = c(
+    "Number of participants",
+    "Age, mean (SD), years",
+    "Female, n (%)",
+    "Pre-existing CKD, n (%)",
+    "Baseline creatinine, mean (SD), mg/dL",
+    "Usual care, n (%)",
+    "Intervention, n (%)",
+    "Composite outcome, n (%)"
+  ),
+  Value = c(
+    nrow(dat),
+    sprintf("%.2f (%.2f)", mean(dat$age), sd(dat$age)),
+    sprintf("%d (%.1f%%)", sum(dat$femalesex == 1),
+            100 * mean(dat$femalesex == 1)),
+    sprintf("%d (%.1f%%)", sum(dat$ckd_pmhx == 1),
+            100 * mean(dat$ckd_pmhx == 1)),
+    sprintf("%.2f (%.2f)", mean(dat$baseline_creat),
+            sd(dat$baseline_creat)),
+    sprintf("%d (%.1f%%)", sum(dat$randomization == 0),
+            100 * mean(dat$randomization == 0)),
+    sprintf("%d (%.1f%%)", sum(dat$randomization == 1),
+            100 * mean(dat$randomization == 1)),
+    sprintf("%d (%.1f%%)", sum(dat$primary_outcome == 1),
+            100 * mean(dat$primary_outcome == 1))
+  )
+)
+
+knitr::kable(desc, booktabs = TRUE, caption = "Characteristics of the analytic sample")
+```
+
+# Statistical methods
+
+Because the outcome is binary, Bayesian logistic regression was used. For participant \(i\), the outcome was assumed to follow a Bernoulli distribution,
+
+\[
+Y_i \mid \pi_i \sim \operatorname{Bernoulli}(\pi_i), \qquad
+\operatorname{logit}(p_i)=\eta_i.
+\]
+
+Two models were fitted. Model 1 included a common treatment effect, while Model 2 added treatment-by-CKD and treatment-by-creatinine interactions. Both models adjusted for the same baseline characteristics and included hospital as a fixed effect. In compact form, the interaction model was
+
+\[
+\begin{aligned}
+\operatorname{logit}(p_i) =\;& \beta_0+\beta_1T_i+\beta_2CKD_i+
+\beta_3CreatZ_i\\
+&+\beta_4(T_i\times CKD_i)+
+\beta_5(T_i\times CreatZ_i)+\boldsymbol{X}_i^\top\boldsymbol{\beta}
++\alpha_{h[i]},
+\end{aligned}
+\]
+
+where \(T_i\) denotes randomized assignment, \(CreatZ_i\) is standardized baseline creatinine, \(\boldsymbol{X}_i\) contains the remaining adjustment variables, and \(\alpha_{h[i]}\) is the hospital fixed effect.
+
+The intercept had a \(N(0,1.5^2)\) prior and the remaining regression coefficients had independent \(N(0,1^2)\) priors. A sensitivity analysis used \(N(0,0.5^2)\) priors for the regression coefficients while retaining the intercept prior. Models were fitted in `brms` using four NUTS chains, 2,000 iterations per chain (1,000 warm-up), and a fixed seed of 532.
+
+The main estimands are standardized predicted risks under usual care and intervention, and their difference:
+\[
+RD=P(Y=1\mid T=1)-P(Y=1\mid T=0).
+\]
+For each posterior draw, predicted probabilities were averaged over the observed covariate and hospital distribution. Thus, a negative risk difference favors intervention and a positive value indicates higher predicted risk under intervention. Model predictive performance was compared using PSIS-LOO. Convergence was assessed using \(\widehat R\), effective sample sizes, trace plots, and divergent transitions; posterior predictive checks were also examined.
+
+```{r model-data}
+model_dat <- dat %>%
+  mutate(
+    age10 = (age - mean(age)) / 10,
+    creat_z = (baseline_creat - mean(baseline_creat)) /
+      sd(baseline_creat),
+    treatment = randomization,
+    ckd = ckd_pmhx,
+    female = femalesex,
+    chf = chf_pmhx,
+    diabetes = dm_pmhx,
+    hypertension = htn_pmhx,
+    cirrhosis = cirrhosis_pmhx
+  ) %>%
+  select(
+    primary_outcome, treatment, ckd, creat_z, age10,
+    age_over_90, female, chf, diabetes, hypertension,
+    cirrhosis, hospital
+  )
+
+stopifnot(nrow(model_dat) == 4003)
+stopifnot(sum(is.na(model_dat)) == 0)
+```
+
+```{r fit-models, cache=TRUE}
+formula_1 <- brms::bf(
+  primary_outcome ~ treatment + ckd + creat_z + age10 +
+    age_over_90 + female + chf + diabetes + hypertension +
+    cirrhosis + hospital
+)
+
+formula_2 <- brms::bf(
+  primary_outcome ~ treatment * ckd + treatment * creat_z +
+    age10 + age_over_90 + female + chf + diabetes +
+    hypertension + cirrhosis + hospital
+)
+
+priors <- c(
+  brms::set_prior("normal(0, 1.5)", class = "Intercept"),
+  brms::set_prior("normal(0, 1)", class = "b")
+)
+
+fit_control <- list(adapt_delta = 0.95, max_treedepth = 12)
+
+# If the saved model files are present, they are reused.
+# Otherwise, the models are fitted from the CSV data.
+if (file.exists("kat_aki_model_1.rds")) {
+  model_1 <- readRDS("kat_aki_model_1.rds")
+} else {
+  model_1 <- brms::brm(
+    formula = formula_1,
+    data = model_dat,
+    family = brms::bernoulli(link = "logit"),
+    prior = priors,
+    chains = 4, iter = 2000, warmup = 1000,
+    seed = 532, control = fit_control,
+    refresh = 0
+  )
+  saveRDS(model_1, "kat_aki_model_1.rds")
+}
+
+if (file.exists("kat_aki_model_2.rds")) {
+  model_2 <- readRDS("kat_aki_model_2.rds")
+} else {
+  model_2 <- brms::brm(
+    formula = formula_2,
+    data = model_dat,
+    family = brms::bernoulli(link = "logit"),
+    prior = priors,
+    chains = 4, iter = 2000, warmup = 1000,
+    seed = 532, control = fit_control,
+    refresh = 0
+  )
+  saveRDS(model_2, "kat_aki_model_2.rds")
+}
+```
+
+# Results and Interpretation
+
+## Overall treatment effect
+
+The observed composite outcome rate was 18.4% in the usual-care group and 19.8% in the intervention group. After adjustment and standardization over the sample covariate distribution, the posterior mean risk was 18.38% (95% credible interval [CrI]: 16.77%–20.02%) under usual care and 19.77% (95% CrI: 18.08%–21.54%) under intervention. The estimated risk difference was 1.40 percentage points (95% CrI: −0.97 to 3.79). The posterior probability that intervention reduced risk was 0.132.
+
+The interval includes both a modest reduction and an increase in risk. Therefore, the analysis provides little posterior support for a lower 14-day composite risk under intervention, but it does not establish that the two risks are equal.
+
+```{r overall-risk-estimates}
+newdata_0 <- model_dat
+newdata_1 <- model_dat
+newdata_0$treatment <- 0
+newdata_1$treatment <- 1
+
+risk_0 <- brms::posterior_epred(model_2, newdata = newdata_0)
+risk_1 <- brms::posterior_epred(model_2, newdata = newdata_1)
+
+mean_risk_0 <- rowMeans(risk_0)
+mean_risk_1 <- rowMeans(risk_1)
+risk_difference <- mean_risk_1 - mean_risk_0
+
+summarize_draws_percent <- function(x) {
+  c(
+    Mean = mean(x) * 100,
+    Lower_95_CI = unname(quantile(x, 0.025)) * 100,
+    Upper_95_CI = unname(quantile(x, 0.975)) * 100
+  )
+}
+
+overall_risk_table <- rbind(
+  "Usual care (%)" = summarize_draws_percent(mean_risk_0),
+  "Intervention (%)" = summarize_draws_percent(mean_risk_1),
+  "Risk difference: intervention minus usual care (percentage points)" =
+    summarize_draws_percent(risk_difference)
+)
+
+knitr::kable(
+  overall_risk_table,
+  digits = 2,
+  caption = "Posterior standardized risks and risk difference"
+)
+
+posterior_probability_lower <- mean(risk_difference < 0)
+```
+
+##  Adjusted Associations
+
+Adjusted Associations
+Table 11 presents the posterior estimates of the regression coefficients from the interaction model as adjusted odds ratios (ORs) with 95% credible intervals (CrI).
+The intercept corresponded to estimated odds of 0.256 (95% CrI: 0.199–0.325), equivalent to an estimated probability of approximately 20% for the reference patient. This represents a male patient at Hospital 1, assigned to usual care, without CKD or other comorbidities, aged under 90 years at the sample mean age, and with average baseline creatinine. The overall event rate was 19.1%.
+
+Pre-existing chronic kidney disease (CKD) had an estimated OR of 0.574 (95% CrI: 0.435–0.763). Because CKD interacted with treatment, this estimate describes patients assigned to usual care. Among otherwise similar patients with average baseline creatinine, those with pre-existing CKD had approximately 42.6% lower estimated odds of experiencing the composite outcome than those without CKD. The credible interval excludes 1, indicating evidence of an association between CKD status and the outcome. The model without interactions produced a similar estimate (OR: 0.625; 95% CrI: 0.509–0.769).
+
+Baseline serum creatinine, standardized with a mean of 1.31 mg/dL and a standard deviation of 0.61 mg/dL, had an estimated OR of 0.986 (95% CrI: 0.862–1.122) per one-standard-deviation increase. This indicates that, among patients assigned to usual care, a one-standard-deviation increase in baseline creatinine was associated with approximately 1.4% lower estimated odds of experiencing the composite outcome. However, the credible interval includes 1, indicating little evidence of a clear association.
+
+Age, measured in 10-year units, had an estimated OR of 1.108 (95% CrI: 1.041–1.181). This indicates that, for two otherwise similar patients who differ in age by 10 years, the older patient had approximately 10.8% higher estimated odds of experiencing the composite outcome. The credible interval excludes 1, indicating evidence of a positive association between age and the outcome. The separate indicator for patients older than 90 years had an estimated OR of 1.132 (95% CrI: 0.824–1.549). Although the point estimate suggests higher odds of the outcome, the credible interval includes 1, indicating insufficient evidence of an additional association beyond the linear age trend.
+
+Female sex had an estimated OR of 0.918 (95% CrI: 0.777–1.083), corresponding to approximately 8.2% lower estimated odds of experiencing the composite outcome compared with otherwise similar male patients. However, the credible interval includes 1, indicating little evidence of a clear association.
+
+Congestive heart failure had an estimated OR of 1.158 (95% CrI: 0.972–1.380), corresponding to approximately 15.8% higher estimated odds of the composite outcome among patients with congestive heart failure than among otherwise similar patients without the condition. The credible interval includes 1, indicating uncertainty about the association.
+Diabetes had an estimated OR of 0.958 (95% CrI: 0.807–1.137), corresponding to approximately 4.2% lower estimated odds of the composite outcome among patients with diabetes than among otherwise similar patients without diabetes. The credible interval includes 1, providing little evidence of a clear association. Similarly, hypertension had an estimated OR of 0.812 (95% CrI: 0.650–1.009), suggesting approximately 18.8% lower estimated odds of the composite outcome among patients with hypertension. Its credible interval narrowly includes 1, indicating uncertainty about this association.
+
+In contrast, cirrhosis had an estimated OR of 1.624 (95% CrI: 1.202–2.158). This indicates that patients with cirrhosis had approximately 62.4% higher estimated odds of experiencing the composite outcome than otherwise similar patients without cirrhosis. The credible interval excludes 1, indicating evidence of a positive association between cirrhosis and the composite outcome.
+
+Hospital was included as a fixed effect, with Hospital 1 serving as the reference category. Compared with otherwise similar patients treated at Hospital 1, patients at Hospital 2 had an estimated OR of 1.326 (95% CrI: 1.041–1.686), corresponding to approximately 32.6% higher odds of the composite outcome. Hospital 5 had an estimated OR of 1.805 (95% CrI: 1.342–2.431), corresponding to approximately 80.5% higher odds, while Hospital 6 had an estimated OR of 1.594 (95% CrI: 1.290–1.967), corresponding to approximately 59.4% higher odds. The credible intervals for these three hospitals exclude 1, indicating evidence of differences in adjusted outcome odds compared with Hospital 1. In contrast, the estimates for Hospital 3 (OR: 0.897; 95% CrI: 0.607–1.306) and Hospital 4 (OR: 1.089; 95% CrI: 0.718–1.636) were not clearly distinguishable from Hospital 1, as their credible intervals include 1.
+
+
+## Did the treatment effect differ by CKD or creatinine?
+
+In the interaction model, the treatment-by-CKD coefficient had a posterior mean of 0.17 (95% CrI: −0.20 to 0.53), while the treatment-by-creatinine coefficient was approximately zero (95% CrI: −0.18 to 0.19). Both intervals include zero.
+
+The standardized risk difference was 0.53 percentage points (95% CrI: −2.72 to 3.71) among participants without CKD and 2.62 percentage points (95% CrI: −0.80 to 6.07) among those with CKD. Although the point estimate was larger for participants with CKD, both intervals include zero. The difference between subgroup point estimates alone is not evidence of treatment-effect modification.
+
+Across the 25th, 50th, and 75th percentiles of baseline creatinine (0.90, 1.18, and 1.57 mg/dL), estimated risk differences were 1.37, 1.39, and 1.42 percentage points, respectively. The posterior contrast between the 75th and 25th percentile risk differences was 0.05 percentage points (95% CrI: −2.95 to 3.04), providing little evidence that the treatment association changes across this range.
+
+```{r ckd-effects}
+get_subgroup_effect <- function(data, ckd_value) {
+  subgroup <- data %>% filter(ckd == ckd_value)
+  nd0 <- subgroup
+  nd1 <- subgroup
+  nd0$treatment <- 0
+  nd1$treatment <- 1
+
+  p0 <- brms::posterior_epred(model_2, newdata = nd0)
+  p1 <- brms::posterior_epred(model_2, newdata = nd1)
+  rd <- rowMeans(p1) - rowMeans(p0)
+
+  tibble(
+    CKD_status = ifelse(ckd_value == 1, "CKD present", "CKD absent"),
+    Mean_RD_pp = mean(rd) * 100,
+    Lower_95_CrI_pp = unname(quantile(rd, 0.025)) * 100,
+    Upper_95_CrI_pp = unname(quantile(rd, 0.975)) * 100,
+    Probability_RD_below_0 = mean(rd < 0)
+  )
+}
+
+ckd_effects <- bind_rows(
+  get_subgroup_effect(model_dat, 0),
+  get_subgroup_effect(model_dat, 1)
+)
+
+knitr::kable(
+  ckd_effects,
+  digits = 3,
+  caption = "Posterior standardized treatment risk differences by CKD status"
+)
+```
+
+```{r creatinine-effects}
+creat_original_values <- quantile(
+  model_dat$creat_z * sd(dat$baseline_creat) + mean(dat$baseline_creat),
+  probs = c(0.25, 0.50, 0.75)
+)
+creat_z_values <- quantile(
+  model_dat$creat_z,
+  probs = c(0.25, 0.50, 0.75)
+)
+
+get_creat_effect <- function(z_value, original_value, label) {
+  nd0 <- model_dat
+  nd1 <- model_dat
+  nd0$treatment <- 0
+  nd1$treatment <- 1
+  nd0$creat_z <- as.numeric(z_value)
+  nd1$creat_z <- as.numeric(z_value)
+
+  p0 <- brms::posterior_epred(model_2, newdata = nd0)
+  p1 <- brms::posterior_epred(model_2, newdata = nd1)
+  rd <- rowMeans(p1) - rowMeans(p0)
+
+  list(
+   table = tibble(
+  Percentile = label,
+  `Baseline creatinine` = as.numeric(original_value),
+  `Mean risk difference (pp)` = mean(rd) * 100,
+  `Lower 95% CrI (pp)` = unname(quantile(rd, 0.025)) * 100,
+  `Upper 95% CrI (pp)` = unname(quantile(rd, 0.975)) * 100,
+  `P(risk difference < 0)` = mean(rd < 0)
+    ),
+    draws = rd
+  )
+}
+
+creat_q25 <- get_creat_effect(creat_z_values[1], creat_original_values[1], "25th")
+creat_q50 <- get_creat_effect(creat_z_values[2], creat_original_values[2], "50th")
+creat_q75 <- get_creat_effect(creat_z_values[3], creat_original_values[3], "75th")
+
+creat_effects <- bind_rows(
+  creat_q25$table, creat_q50$table, creat_q75$table
+)
+
+knitr::kable(
+  creat_effects,
+  digits = 3,
+  caption = "Posterior standardized treatment risk differences across baseline creatinine percentiles"
+)
+
+creatinine_difference <- creat_q75$draws - creat_q25$draws
+creatinine_contrast <- tibble(
+  Contrast = "75th vs 25th percentile",
+  `Mean change (pp)` = mean(creatinine_difference) * 100,
+  `Lower 95% CrI (pp)` = unname(quantile(creatinine_difference, 0.025)) * 100,
+  `Upper 95% CrI (pp)` = unname(quantile(creatinine_difference, 0.975)) * 100,
+  `P(change < 0)` = mean(creatinine_difference < 0),
+  `P(change > 0)` = mean(creatinine_difference > 0)
+)
+
+knitr::kable(
+  creatinine_contrast,
+  digits = 3,
+  caption = "Posterior contrast in risk difference between the 75th and 25th creatinine percentiles"
+)
+```
+
+Figure 1 summarizes the overall and subgroup estimates on the absolute-risk scale. The intervals cross zero, emphasizing the uncertainty in the direction and magnitude of the treatment differences.
+
+```{r primary-effects-forest, fig.cap="Posterior standardized risk differences for the overall population, CKD subgroups, and selected baseline creatinine percentiles. Points show posterior means and horizontal lines show 95% credible intervals."}
+forest_effects <- bind_rows(
+  tibble(
+    Estimate = "Overall population",
+    Mean = mean(risk_difference) * 100,
+    Lower = unname(quantile(risk_difference, 0.025)) * 100,
+    Upper = unname(quantile(risk_difference, 0.975)) * 100
+  ),
+  ckd_effects %>% transmute(
+    Estimate = CKD_status,
+    Mean = Mean_RD_pp,
+    Lower = Lower_95_CrI_pp,
+    Upper = Upper_95_CrI_pp
+  ),
+  creat_effects %>% transmute(
+    Estimate = paste0("Creatinine: ", Percentile, " percentile"),
+    Mean = `Mean risk difference (pp)`,
+    Lower = `Lower 95% CrI (pp)`,
+    Upper = `Upper 95% CrI (pp)`
+  )
+) %>%
+  mutate(Estimate = factor(Estimate, levels = rev(Estimate)))
+
+ggplot(forest_effects, aes(x = Mean, y = Estimate)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey45") +
+  geom_errorbarh(aes(xmin = Lower, xmax = Upper), height = 0.18) +
+  geom_point(size = 2.5) +
+  labs(
+    x = "Risk difference (percentage points; intervention minus usual care)",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 11)
+```
+
+## Model comparison and sensitivity analysis
+
+PSIS-LOO showed no meaningful predictive advantage for the interaction model. The common-effect model had an ELPD\(_{LOO}\) of −1927.3 (SE 36.4), compared with −1928.7 (SE 36.4) for the interaction model. The added interactions therefore did not improve predictive performance, although Model 2 was retained for the prespecified subgroup estimates.
+
+The skeptical-prior sensitivity analysis gave nearly identical overall estimates: the risk difference was 1.40 percentage points under the primary prior and 1.38 percentage points under the more concentrated prior. This similarity suggests that the overall result was not materially sensitive to this prior change.
+
+```{r loo-comparison, cache=TRUE}
+loo_1 <- loo::loo(model_1)
+loo_2 <- loo::loo(model_2)
+
+loo_table <- tibble(
+  Model = c("Common-effect Model 1", "Interaction Model 2"),
+  ELPD_LOO = c(loo_1$estimates["elpd_loo", "Estimate"],
+               loo_2$estimates["elpd_loo", "Estimate"]),
+  SE = c(loo_1$estimates["elpd_loo", "SE"],
+         loo_2$estimates["elpd_loo", "SE"]),
+  LOOIC = c(loo_1$estimates["looic", "Estimate"],
+            loo_2$estimates["looic", "Estimate"])
+)
+
+knitr::kable(loo_table, digits = 1, caption = "PSIS-LOO model comparison")
+```
+
+```{r fit-sensitivity, cache=TRUE}
+skeptical_priors <- c(
+  brms::set_prior("normal(0, 1.5)", class = "Intercept"),
+  brms::set_prior("normal(0, 0.5)", class = "b")
+)
+
+if (file.exists("kat_aki_model_2_skeptical.rds")) {
+  model_2_skeptical <- readRDS("kat_aki_model_2_skeptical.rds")
+} else {
+  model_2_skeptical <- brms::brm(
+    formula = formula_2,
+    data = model_dat,
+    family = brms::bernoulli(link = "logit"),
+    prior = skeptical_priors,
+    chains = 4, iter = 2000, warmup = 1000,
+    seed = 532, control = fit_control,
+    refresh = 0
+  )
+  saveRDS(model_2_skeptical, "kat_aki_model_2_skeptical.rds")
+}
+
+risk_0_sens <- brms::posterior_epred(
+  model_2_skeptical, newdata = newdata_0
+)
+risk_1_sens <- brms::posterior_epred(
+  model_2_skeptical, newdata = newdata_1
+)
+
+mean_risk_0_sens <- rowMeans(risk_0_sens)
+mean_risk_1_sens <- rowMeans(risk_1_sens)
+risk_difference_sens <- mean_risk_1_sens - mean_risk_0_sens
+
+summarize_percent <- function(x) {
+  c(
+    Mean = mean(x) * 100,
+    Lower = unname(quantile(x, 0.025)) * 100,
+    Upper = unname(quantile(x, 0.975)) * 100
+  )
+}
+
+sensitivity_table <- rbind(
+  "Primary: usual care risk (%)" = summarize_percent(mean_risk_0),
+  "Skeptical prior: usual care risk (%)" = summarize_percent(mean_risk_0_sens),
+  "Primary: intervention risk (%)" = summarize_percent(mean_risk_1),
+  "Skeptical prior: intervention risk (%)" = summarize_percent(mean_risk_1_sens),
+  "Primary: risk difference (pp)" = summarize_percent(risk_difference),
+  "Skeptical prior: risk difference (pp)" =
+    summarize_percent(risk_difference_sens)
+)
+
+knitr::kable(
+  sensitivity_table,
+  digits = 2,
+  caption = "Comparison of primary and skeptical-prior posterior estimates"
+)
+```
+
+# Discussion and conclusion
+
+Among 4,003 hospitalized patients with AKI, the analysis did not find strong posterior evidence that assignment to the KAT intervention reduced the 14-day composite outcome compared with usual care. The standardized risk difference (intervention minus usual care) was 1.40 percentage points, with a 95% credible interval spanning a small reduction and a larger increase in risk. The posterior probability that the intervention reduced the outcome risk was 0.132.
+
+There was also no clear evidence that the treatment association differed by CKD status or baseline creatinine. The CKD-specific estimates remained uncertain, while the estimated risk differences across baseline creatinine percentiles were nearly identical. The interaction model showed no meaningful predictive advantage over the common-effect model, and the overall treatment-effect estimate was robust to the more concentrated coefficient prior.
+
+The results were not be interpreted as proof of no treatment effect or identical effects across patient subgroups. The analysis was limited to the available variables and the binary composite outcome, which combines clinical events that may differ in severity. Additionally, only CKD and baseline creatinine were examined as potential effect modifiers; interactions with other patient characteristics were not assessed. Although treatment assignment was randomized, other patient characteristics were not, meaning that their observed associations cannot necessarily be interpreted as causal. Furthermore, the association between CKD and the outcome should be interpreted cautiously because the assessment of AKI progression depends partly on baseline kidney function. Hospital was included as a fixed effect for the six hospitals represented in the dataset, which may limit the extent to which the findings can be generalized to other healthcare environments.
+
+In conclusion, the results indicate uncertainty about the average treatment effect and provide little evidence of treatment-effect heterogeneity across the two baseline kidney measures. In conclusion, the analysis did not provide sufficient evidence that the KAT intervention reduced the 14-day composite outcome compared with usual care.
+
+
+\newpage
+# References
+
+::: {#refs}
+:::
+
+\newpage
+# Appendix
+
+The following diagnostics and supplementary summaries support the main analysis. They are separated from the main report to keep the presentation focused.
+
+
+## descriptive plots
+
+```{r appendix-outcome-distribution, fig.cap="Observed distribution of the 14-day composite clinical outcome."}
+ggplot(dat, aes(x = factor(primary_outcome), fill = factor(primary_outcome))) +
+  geom_bar() +
+  scale_fill_manual(values = c("0" = "steelblue", "1" = "tomato")) +
+  scale_x_discrete(labels = c("0" = "No event", "1" = "Composite event")) +
+  labs(x = NULL, y = "Number of participants") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none")
+```
+
+
+```{r appendix-crude-rates, fig.cap="Unadjusted composite outcome proportions by randomized group."}
+crude_rates <- dat %>%
+  group_by(randomization) %>%
+  summarise(
+    Participants = n(),
+    Events = sum(primary_outcome == 1),
+    Event_rate = mean(primary_outcome == 1),
+    .groups = "drop"
+  ) %>%
+  mutate(Event_percentage = 100 * Event_rate)
+
+knitr::kable(
+  crude_rates,
+  digits = 2,
+  caption = "Unadjusted 14-day composite outcome rates by treatment group"
+)
+
+
+ggplot(crude_rates, aes(x = factor(randomization), y = Event_rate,
+                        fill = factor(randomization))) +
+  geom_col(width = 0.65) +
+  scale_fill_manual(values = c("0" = "steelblue", "1" = "tomato")) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  scale_x_discrete(labels = c("0" = "Usual care", "1" = "Intervention")) +
+  labs(x = NULL, y = "Observed event proportion") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none")
+```
+
+## MCMC diagnostics
+
+```{r appendix-convergence}
+summarize_model <- function(fit, model_label) {
+  posterior::summarise_draws(
+    posterior::as_draws_array(fit),
+    "mean", "sd", "rhat", "ess_bulk", "ess_tail"
+  ) %>%
+    as_tibble() %>%
+    mutate(Model = model_label, .before = 1)
+}
+diag_table <- bind_rows(
+  summarize_model(model_1, "Common-effect model"),
+  summarize_model(model_2, "Interaction model")
+)
+diag_table %>%
+  filter(grepl("^b_", variable)) %>%
+  knitr::kable(digits = 2, caption = "MCMC convergence and effective sample size summaries")
+```
+
+```{r appendix-divergences}
+count_divergences <- function(fit) {
+  np <- brms::nuts_params(fit)
+  sum(np$Value[np$Parameter == "divergent__"])
+}
+tibble(
+  Model = c("Common-effect model", "Interaction model"),
+  Divergent_transitions = c(count_divergences(model_1), count_divergences(model_2))
+) %>%
+  knitr::kable(caption = "Number of divergent transitions")
+```
+
+## Trace plots and posterior predictive checks
+
+```{r appendix-trace-model1, fig.cap="Trace plots for selected parameters in the common-effect model."}
+bayesplot::mcmc_trace(
+  posterior::as_draws_array(model_1),
+  pars = c("b_treatment", "b_ckd", "b_creat_z")
+)
+```
+
+```{r appendix-trace-model2, fig.cap="Trace plots for treatment and interaction parameters in the interaction model."}
+bayesplot::mcmc_trace(
+  posterior::as_draws_array(model_2),
+  pars = c("b_treatment", "b_treatment:ckd", "b_treatment:creat_z")
+)
+```
+
+```{r appendix-ppc-model1, fig.cap="Posterior predictive check for the common-effect model."}
+bayesplot::pp_check(model_1, type = "bars")
+```
+
+```{r appendix-ppc-model2, fig.cap="Posterior predictive check for the interaction model."}
+bayesplot::pp_check(model_2, type = "bars")
+```
+
+
+```{r appendix-ppc-mean, fig.cap="Posterior predictive check for the mean outcome for the interaction model."}
+bayesplot::pp_check(model_2, type = "stat", stat = "mean")
+```
+
+## Posterior distribution of the overall risk difference
+
+```{r risk-difference-figure, fig.cap="Posterior distribution of the standardized risk difference (intervention group minus usual care). The vertical line marks no difference."}
+risk_difference_df <- tibble(Risk_Difference = risk_difference)
+ggplot(risk_difference_df, aes(x = Risk_Difference)) +
+  geom_density(fill = "blue", color = "red") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(
+    x = "Risk difference (intervention minus usual care)",
+    y = "Posterior density"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+## Full coefficient summaries and PSIS-LOO diagnostics
+
+```{r appendix-coefficients}
+
+coef_table <- function(fit, model_name) {
+  as.data.frame(brms::fixef(fit, probs = c(0.025, 0.975))) %>%
+    tibble::rownames_to_column("Parameter") %>%
+    dplyr::rename(
+      Beta = Estimate,
+      SD = Est.Error,
+      Lower_95_CrI = Q2.5,
+      Upper_95_CrI = Q97.5
+    ) %>%
+    dplyr::mutate(
+      OR = exp(Beta),
+      Lower_OR_95_CrI = exp(Lower_95_CrI),
+      Upper_OR_95_CrI = exp(Upper_95_CrI),
+      Model = model_name
+    ) %>%
+    dplyr::select(
+      Parameter,
+      OR,
+      Lower_OR_95_CrI,
+      Upper_OR_95_CrI,
+      Beta,
+      SD,
+      Lower_95_CrI,
+      Upper_95_CrI,
+      Model
+    )
+}
+
+dplyr::bind_rows(
+  coef_table(model_1, "Common-effect model"),
+  coef_table(model_2, "Interaction model")
+) %>%
+  knitr::kable(
+    digits = 3,
+    col.names = c(
+      "Parameter",
+      "OR",
+      "Lower 95% CrI (OR)",
+      "Upper 95% CrI (OR)",
+      "Beta",
+      "SD",
+      "Lower 95% CrI (log-odds)",
+      "Upper 95% CrI (log-odds)",
+      "Model"
+    ),
+    caption = "Posterior summaries of regression parameters, odds ratios, and credible intervals"
+  )
+```
+
+
+
+```{r appendix-loo-diagnostics}
+loo::pareto_k_table(loo_1)
+loo::pareto_k_table(loo_2)
+```
+
+
+
