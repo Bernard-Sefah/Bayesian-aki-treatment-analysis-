@@ -13,27 +13,28 @@ Investigate whether baseline clinical characteristics modify treatment effects.
 Estimate posterior probabilities and treatment-related risk differences to characterize clinical outcomes and uncertainty.
 Statistical Methods
 
-Bayesian logistic regression
-Treatment-by-covariate interaction models
-Markov Chain Monte Carlo (MCMC) estimation
-Posterior predictive assessment
-Model comparison using approximate leave-one-out cross-validation (LOO)
-Convergence diagnostics and posterior assessment
-Tools and Technologies
+- Bayesian logistic regression
+- Treatment-by-covariate interaction models
+- Markov Chain Monte Carlo (MCMC) estimation
+- Posterior predictive assessment
+- Model comparison using approximate leave-one-out cross-validation (LOO)
+- Convergence diagnostics and posterior assessment
 
-R
-R Markdown
-brms
-Stan
-tidyverse
-loo
-ggplot2
-Repository Structure
+# Tools and Technologies
 
-AKI_Bayesian_Analysis.Rmd: Source file containing the statistical analysis and R code.
-AKI_Bayesian_Analysis.pdf: Knitted PDF report presenting the analysis, results, and interpretations.
-README.md: Project overview and documentation.
-Data Availability
+- R Markdown
+- brms
+- Stan
+- tidyverse
+- loo
+- ggplot2
+
+# Repository Structure
+
+- AKI_Bayesian_Analysis.Rmd: Source file containing the statistical analysis and R code.
+- AKI_Bayesian_Analysis.pdf: Knitted PDF report presenting the analysis, results, and interpretations.
+- README.md: Project overview and documentation.
+- Data Availability
 
 The analysis uses data from the KAT-AKI randomized clinical trial. The original dataset is available through the Dryad repository.
 
@@ -47,7 +48,7 @@ Required R packages should be installed before running the analysis. Access to t
 
 # Author
 
-Bernard Sefah
-MS Statistics
-Department of Mathematical Sciences
-Montana State University
+- Bernard Sefah
+- MS Statistics
+- Department of Mathematical Sciences
+- Montana State University
